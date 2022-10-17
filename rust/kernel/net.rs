@@ -7,8 +7,12 @@
 //! [`include/linux/skbuff.h`](../../../../include/linux/skbuff.h).
 
 use crate::{
-    bindings, device, error::code::ENOMEM, str::CStr, to_result, types::PointerWrapper, ARef,
-    AlwaysRefCounted, Error, Result,
+    bindings, device,
+    error::{code::ENOMEM, from_kernel_result},
+    str::CStr,
+    to_result,
+    types::PointerWrapper,
+    ARef, AlwaysRefCounted, Error, Result,
 };
 use core::{
     cell::UnsafeCell,
@@ -50,67 +54,80 @@ impl Device {
 
     /// Sets carrier.
     pub fn netif_carrier_on(&self) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
         unsafe { bindings::netif_carrier_on(self.0.get()) }
     }
 
     /// Clears carrier.
     pub fn netif_carrier_off(&self) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
         unsafe { bindings::netif_carrier_off(self.0.get()) }
     }
 
     /// Assigns Ethernet address to a net_device.
     pub fn eth_hw_addr_set(&self, addr: &[u8; 6]) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
         unsafe { bindings::eth_hw_addr_set(self.0.get(), addr as _) }
     }
 
     /// Returns the mtu of the device.
     pub fn mtu_get(&self) -> u32 {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
         unsafe { addr_of!((*self.0.get()).mtu).read() }
     }
 
     /// Sets the max mtu of the device.
     pub fn max_mtu_set(&self, max_mtu: u32) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
         unsafe { addr_of_mut!((*self.0.get()).max_mtu).write(max_mtu) };
     }
 
     /// Sets the minimum mtu of the device.
     pub fn min_mtu_set(&self, min_mtu: u32) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
         unsafe { addr_of_mut!((*self.0.get()).min_mtu).write(min_mtu) };
     }
 
     ///　Returns the flags of the device.
     pub fn flags_get(&self) -> u32 {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
         unsafe { addr_of!((*self.0.get()).flags).read() }
     }
 
     ///　Sets the priv_flags of the device.
     pub fn priv_flags_get(&self) -> u64 {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
         unsafe { addr_of!((*self.0.get()).priv_flags).read() }
     }
 
     ///　Returns the priv_flags of the device.
     pub fn priv_flags_set(&self, flags: u64) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
         unsafe { addr_of_mut!((*self.0.get()).priv_flags).write(flags) }
     }
 
     /// Reports the number of bytes queued to hardware.
     pub fn sent_queue(&self, bytes: u32) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
         unsafe { bindings::netdev_sent_queue(self.0.get(), bytes) }
     }
 
     /// Allows the upper layers to transmit.
     pub fn netif_start_queue(&self) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
         unsafe { bindings::netif_start_queue(self.0.get()) }
     }
 
     /// Stop the upper layers to transmit.
     pub fn netif_stop_queue(&self) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
         unsafe { bindings::netif_stop_queue(self.0.get()) }
     }
 
     /// Allocate an skbuff for rx on the device.
     /// with IP header placed at an aligned offset.
     pub fn alloc_skb_ip_align(&self, length: u32) -> Result<ARef<SkBuff>> {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
         let skb = unsafe { bindings::netdev_alloc_skb_ip_align(self.0.get(), length) };
         if skb.is_null() {
             Err(ENOMEM)
@@ -130,10 +147,12 @@ pub struct Registration<T: DeviceOperations> {
 impl<T: DeviceOperations> Registration<T> {
     /// Creates new instance of registration.
     pub fn try_new(parent: &dyn device::RawDevice) -> Result<Self> {
+        // SAFETY: FFI call.
         let dev = unsafe { bindings::alloc_etherdev_mqs(0, 1, 1) };
         if dev.is_null() {
             Err(ENOMEM)
         } else {
+            // SAFETY: `dev` was allocated during initialization and is guaranteed to be valid.
             unsafe { (*dev).dev.parent = parent.raw_device() }
             Ok(Registration {
                 dev,
@@ -151,13 +170,20 @@ impl<T: DeviceOperations> Registration<T> {
 
     /// Register a network device.
     pub fn register(&mut self, data: T::Data) -> Result {
-        unsafe { (*self.dev).netdev_ops = Self::build_device_ops() }
-        let ret = unsafe { bindings::register_netdev(self.dev) };
+        // SAFETY: `dev` was allocated during initialization and is guaranteed to be valid.
+        let ret = unsafe {
+            (*self.dev).netdev_ops = Self::build_device_ops();
+            bindings::register_netdev(self.dev)
+        };
         if ret != 0 {
             Err(Error::from_kernel_errno(ret))
         } else {
             self.registered = true;
             unsafe {
+                // SAFETY: The C contract guarantees that `data` is available
+                // for implementers of the net_device operations (no other C code accesses
+                // it), so we know that there are no concurrent threads/CPUs accessing
+                // it (it's not visible to any other Rust code).
                 bindings::dev_set_drvdata(&mut (*self.dev).dev, data.into_pointer() as _);
             }
             Ok(())
@@ -167,10 +193,13 @@ impl<T: DeviceOperations> Registration<T> {
 
 impl<T: DeviceOperations> Drop for Registration<T> {
     fn drop(&mut self) {
-        if self.registered {
-            unsafe { bindings::unregister_netdev(self.dev) }
+        // SAFETY: `dev` was allocated during initialization and guaranteed to be valid.
+        unsafe {
+            if self.registered {
+                bindings::unregister_netdev(self.dev);
+            }
+            bindings::free_netdev(self.dev);
         }
-        unsafe { bindings::free_netdev(self.dev) }
     }
 }
 
@@ -287,34 +316,53 @@ impl<T: DeviceOperations> Registration<T> {
         ndo_get_tstamp: None,
     };
 
-    const unsafe fn build_device_ops() -> &'static bindings::net_device_ops {
+    const fn build_device_ops() -> &'static bindings::net_device_ops {
         &Self::DEVICE_OPS
     }
 
     unsafe extern "C" fn open_callback(netdev: *mut bindings::net_device) -> core::ffi::c_int {
-        let ptr = unsafe { bindings::dev_get_drvdata(&mut (*netdev).dev) };
-        let dev = unsafe { Device::from_ptr(netdev) };
-        let data = unsafe { T::Data::borrow(ptr) };
-        T::open(dev, data)
+        from_kernel_result! {
+            // SAFETY: The C API guarantees that `net_device` isn't released while this function is running.
+            let dev = unsafe { Device::from_ptr(netdev) };
+            // SAFETY: The value stored as driver data was returned by `into_pointer` during registration.
+            let data = unsafe { T::Data::borrow(bindings::dev_get_drvdata(&mut (*netdev).dev)) };
+            T::open(dev, data)?;
+            Ok(0)
+        }
     }
 
     unsafe extern "C" fn stop_callback(netdev: *mut bindings::net_device) -> core::ffi::c_int {
-        let ptr = unsafe { bindings::dev_get_drvdata(&mut (*netdev).dev) };
-        let dev = unsafe { Device::from_ptr(netdev) };
-        let data = unsafe { T::Data::borrow(ptr) };
-        T::stop(dev, data)
+        from_kernel_result! {
+            // SAFETY: The C API guarantees that `net_device` isn't released while this function is running.
+            let dev = unsafe { Device::from_ptr(netdev) };
+            // SAFETY: The value stored as driver data was returned by `into_pointer` during registration.
+            let data = unsafe { T::Data::borrow(bindings::dev_get_drvdata(&mut (*netdev).dev)) };
+            T::stop(dev, data)?;
+            Ok(0)
+        }
     }
 
     unsafe extern "C" fn start_xmit_callback(
         skb: *mut bindings::sk_buff,
         netdev: *mut bindings::net_device,
-    ) -> core::ffi::c_int {
-        let ptr = unsafe { bindings::dev_get_drvdata(&mut (*netdev).dev) };
+    ) -> bindings::netdev_tx_t {
+        // SAFETY: The C API guarantees that `net_device` isn't released while this function is running.
         let dev = unsafe { Device::from_ptr(netdev) };
+        // SAFETY: The C API guarantees that `sk_buff` isn't released while this function is running.
         let skb = unsafe { SkBuff::from_ptr(skb) };
-        let data = unsafe { T::Data::borrow(ptr) };
-        T::start_xmit(skb, dev, data)
+        // SAFETY: The value stored as driver data was returned by `into_pointer` during registration.
+        let data = unsafe { T::Data::borrow(bindings::dev_get_drvdata(&mut (*netdev).dev)) };
+        T::start_xmit(skb, dev, data) as bindings::netdev_tx_t
     }
+}
+
+/// Driver transmit return codes.
+#[repr(i32)]
+pub enum NetdevTx {
+    /// Driver took care of packet.
+    Ok = bindings::netdev_tx_NETDEV_TX_OK,
+    /// Driver tx path was busy.
+    Busy = bindings::netdev_tx_NETDEV_TX_BUSY,
 }
 
 // SAFETY: `Registration` does not expose any of its state across threads.
@@ -332,17 +380,17 @@ pub trait DeviceOperations {
     type Data: PointerWrapper + Send + Sync = ();
 
     /// Corresponds to `ndo_open` in `struct net_device_ops`.
-    fn open(dev: &Device, data: <Self::Data as PointerWrapper>::Borrowed<'_>) -> i32;
+    fn open(dev: &Device, data: <Self::Data as PointerWrapper>::Borrowed<'_>) -> Result;
 
     /// Corresponds to `ndo_stop` in `struct net_device_ops`.
-    fn stop(dev: &Device, data: <Self::Data as PointerWrapper>::Borrowed<'_>) -> i32;
+    fn stop(dev: &Device, data: <Self::Data as PointerWrapper>::Borrowed<'_>) -> Result;
 
     /// Corresponds to `ndo_start_xmit` in `struct net_device_ops`.
     fn start_xmit(
         skb: &SkBuff,
         dev: &Device,
         data: <Self::Data as PointerWrapper>::Borrowed<'_>,
-    ) -> i32;
+    ) -> NetdevTx;
 }
 
 /// Wraps the kernel's `struct net`.
