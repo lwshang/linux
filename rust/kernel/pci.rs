@@ -6,7 +6,10 @@
 
 use crate::{
     bindings, device, driver,
-    error::{from_kernel_result, Error, Result},
+    error::{
+        code::{EINVAL, ENOMEM},
+        from_kernel_result, Error, Result,
+    },
     str::CStr,
     to_result,
     types::PointerWrapper,
@@ -224,6 +227,30 @@ pub trait Driver {
     fn remove(_data: &Self::Data);
 }
 
+/// PCI resource
+pub struct Resource {
+    start: bindings::resource_size_t,
+    end: bindings::resource_size_t,
+    flags: u64,
+}
+
+impl Resource {
+    /// resource length
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> u64 {
+        if self.end == 0 {
+            0
+        } else {
+            self.end - self.start + 1
+        }
+    }
+
+    /// check resource flags
+    pub fn check_flags(&self, bits: u32) -> bool {
+        self.flags & (bits as u64) > 0
+    }
+}
+
 /// A PCI device.
 ///
 /// # Invariants
@@ -266,11 +293,148 @@ impl Device {
             Ok(())
         }
     }
+
+    /// iter PCI Resouces
+    pub fn iter_resource(&self) -> impl Iterator<Item = Resource> + '_ {
+        // SAFETY: By the type invariants, we know that `self.ptr` is non-null and valid.
+        let pdev = unsafe { &*self.ptr };
+        pdev.resource.iter().map(|x| Resource {
+            start: x.start,
+            end: x.end,
+            flags: x.flags,
+        })
+    }
+
+    /// Return BAR mask from the type of resource
+    pub fn select_bars(&self, flags: u64) -> i32 {
+        // SAFETY: By the type invariants, we know that `self.ptr` is non-null and valid.
+        unsafe { bindings::pci_select_bars(self.ptr, flags) }
+    }
+
+    /// Reserve selected PCI I/O and memory resources
+    pub fn request_selected_regions(&mut self, bars: i32, name: &'static CStr) -> Result {
+        // SAFETY: By the type invariants, we know that `self.ptr` is non-null and valid.
+        let ret =
+            unsafe { bindings::pci_request_selected_regions(self.ptr, bars, name.as_char_ptr()) };
+        if ret != 0 {
+            Err(Error::from_kernel_errno(ret))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Get address for accessing the device
+    pub fn map_resource(&self, resource: &Resource, len: usize) -> Result<MappedResource> {
+        MappedResource::try_new(resource.start, len)
+    }
 }
 
 unsafe impl device::RawDevice for Device {
     fn raw_device(&self) -> *mut bindings::device {
         // SAFETY: By the type invariants, we know that `self.ptr` is non-null and valid.
         unsafe { &mut (*self.ptr).dev }
+    }
+}
+
+/// Address for accessing the device
+/// io_mem.rs requires const size but some drivers have to handle
+/// non const size with ioremap().
+pub struct MappedResource {
+    /// address
+    pub ptr: usize,
+    len: usize,
+}
+
+macro_rules! define_read {
+    ($(#[$attr:meta])* $name:ident, $type_name:ty) => {
+        /// Reads IO data from the given offset
+        $(#[$attr])*
+        #[inline]
+        pub fn $name(&self, offset: usize) -> Result<$type_name> {
+            if offset + core::mem::size_of::<$type_name>() > self.len {
+                return Err(EINVAL);
+            }
+            // SAFETY: The type invariants guarantee that `ptr` is a valid pointer. The check above
+            // guarantees that the code won't link if `offset` makes the write go out of bounds
+            // (including the type size).
+            let ptr = self.ptr.wrapping_add(offset);
+            Ok(unsafe { bindings::$name(ptr as _) })
+        }
+    };
+}
+
+macro_rules! define_write {
+    ($(#[$attr:meta])* $name:ident, $type_name:ty) => {
+        /// Writes IO data to the given offset
+        $(#[$attr])*
+        #[inline]
+        pub fn $name(&self, value: $type_name, offset: usize) -> Result {
+            if offset + core::mem::size_of::<$type_name>() > self.len {
+                return Err(EINVAL);
+            }
+            // SAFETY: The type invariants guarantee that `ptr` is a valid pointer. The check above
+            // guarantees that the code won't link if `offset` makes the write go out of bounds
+            // (including the type size).
+            let ptr = self.ptr.wrapping_add(offset);
+            unsafe { bindings::$name(value, ptr as _) };
+            Ok(())
+        }
+   };
+}
+
+impl MappedResource {
+    fn try_new(offset: bindings::resource_size_t, len: usize) -> Result<Self> {
+        let addr = unsafe { bindings::ioremap(offset, len as _) };
+        if addr.is_null() {
+            Err(ENOMEM)
+        } else {
+            Ok(Self {
+                ptr: addr as usize,
+                len,
+            })
+        }
+    }
+
+    define_read!(readb, u8);
+    define_read!(readb_relaxed, u8);
+    define_read!(readw, u16);
+    define_read!(readw_relaxed, u16);
+    define_read!(readl, u32);
+    define_read!(readl_relaxed, u32);
+    define_read!(
+        #[cfg(CONFIG_64BIT)]
+        readq,
+        u64
+    );
+    define_read!(
+        #[cfg(CONFIG_64BIT)]
+        readq_relaxed,
+        u64
+    );
+
+    define_write!(writeb, u8);
+    define_write!(writeb_relaxed, u8);
+    define_write!(writew, u16);
+    define_write!(writew_relaxed, u16);
+    define_write!(writel, u32);
+    define_write!(writel_relaxed, u32);
+    define_write!(
+        #[cfg(CONFIG_64BIT)]
+        writeq,
+        u64
+    );
+    define_write!(
+        #[cfg(CONFIG_64BIT)]
+        writeq_relaxed,
+        u64
+    );
+}
+
+impl Drop for MappedResource {
+    fn drop(&mut self) {
+        unsafe {
+            // SAFETY: By the type invariants, we know that `self.ptr` is non-null and valid.
+            bindings::iounmap(self.ptr as _);
+        }
     }
 }
