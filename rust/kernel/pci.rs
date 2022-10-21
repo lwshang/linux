@@ -6,7 +6,7 @@
 
 use crate::{
     bindings, device, driver,
-    error::{from_kernel_result, Result},
+    error::{from_kernel_result, Error, Result},
     str::CStr,
     to_result,
     types::PointerWrapper,
@@ -242,6 +242,29 @@ impl Device {
     /// instance.
     unsafe fn from_ptr(ptr: *mut bindings::pci_dev) -> Self {
         Self { ptr }
+    }
+
+    /// enables bus-mastering for device
+    pub fn set_master(&self) {
+        // SAFETY: By the type invariants, we know that `self.ptr` is non-null and valid.
+        unsafe { bindings::pci_set_master(self.ptr) };
+    }
+
+    /// get legacy irq number
+    pub fn irq(&self) -> u32 {
+        // SAFETY: By the type invariants, we know that `self.ptr` is non-null and valid.
+        unsafe { (*self.ptr).irq }
+    }
+
+    /// Initialize device
+    pub fn enable_device(&mut self) -> Result {
+        // SAFETY: By the type invariants, we know that `self.ptr` is non-null and valid.
+        let ret = unsafe { bindings::pci_enable_device(self.ptr) };
+        if ret != 0 {
+            Err(Error::from_kernel_errno(ret))
+        } else {
+            Ok(())
+        }
     }
 }
 
