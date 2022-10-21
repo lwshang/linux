@@ -741,6 +741,42 @@ struct sk_buff *rust_helper_netdev_alloc_skb_ip_align(struct net_device *dev,
 EXPORT_SYMBOL_GPL(rust_helper_netdev_alloc_skb_ip_align);
 #endif
 
+u8 rust_helper_inb(unsigned long addr)
+{
+	return inb(addr);
+}
+EXPORT_SYMBOL_GPL(rust_helper_inb);
+
+u16 rust_helper_inw(unsigned long addr)
+{
+	return inw(addr);
+}
+EXPORT_SYMBOL_GPL(rust_helper_inw);
+
+u32 rust_helper_inl(unsigned long addr)
+{
+	return inl(addr);
+}
+EXPORT_SYMBOL_GPL(rust_helper_inl);
+
+void rust_helper_outb(u8 value, unsigned long addr)
+{
+	outb(value, addr);
+}
+EXPORT_SYMBOL_GPL(rust_helper_outb);
+
+void rust_helper_outw(u16 value, unsigned long addr)
+{
+	outw(value, addr);
+}
+EXPORT_SYMBOL_GPL(rust_helper_outw);
+
+void rust_helper_outl(u32 value, unsigned long addr)
+{
+	outl(value, addr);
+}
+EXPORT_SYMBOL_GPL(rust_helper_outl);
+
 /*
  * We use `bindgen`'s `--size_t-is-usize` option to bind the C `size_t` type
  * as the Rust `usize` type, so we can use it in contexts where Rust

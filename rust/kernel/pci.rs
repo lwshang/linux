@@ -237,11 +237,11 @@ pub struct Resource {
 impl Resource {
     /// resource length
     #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> u64 {
+    pub fn len(&self) -> usize {
         if self.end == 0 {
             0
         } else {
-            self.end - self.start + 1
+            (self.end - self.start + 1) as usize
         }
     }
 
@@ -437,4 +437,28 @@ impl Drop for MappedResource {
             bindings::iounmap(self.ptr as _);
         }
     }
+}
+
+///
+pub struct IoPort {
+    ptr: usize,
+    len: usize,
+}
+
+impl IoPort {
+    ///
+    pub fn try_new(re: &Resource) -> Result<Self> {
+        Ok(Self {
+            ptr: re.start as usize,
+            len: re.len(),
+        })
+    }
+
+    define_read!(inb, u8);
+    define_read!(inw, u16);
+    define_read!(inl, u32);
+
+    define_write!(outb, u8);
+    define_write!(outw, u16);
+    define_write!(outl, u32);
 }
