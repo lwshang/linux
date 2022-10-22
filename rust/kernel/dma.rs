@@ -4,8 +4,6 @@
 //!
 //! C header: [`include/linux/dma-mapping.h`](../../../../include/linux/dma-mapping.h)
 
-#![allow(dead_code)]
-
 use crate::{bindings, device, device::RawDevice, error, to_result, Result};
 
 /// Set the DMA mask to inform the kernel about DMA addressing capabilities.
@@ -21,7 +19,7 @@ pub fn set_coherent_mask(dev: &dyn device::RawDevice, mask: u64) -> Result {
 /// Information about allocated DMA-coherent memory.
 pub struct Allocation<T> {
     dev: device::Device,
-    size: usize,
+    count: usize,
     /// DMA address
     pub dma_handle: bindings::dma_addr_t,
     /// processor memory
@@ -32,10 +30,11 @@ impl<T> Allocation<T> {
     /// Alloc DMA-coherent memory.
     pub fn try_new(
         dev: &dyn device::RawDevice,
-        size: usize,
+        count: usize,
         flag: bindings::gfp_t,
     ) -> Result<Allocation<T>> {
         let mut dma_handle = 0;
+        let size = core::mem::size_of::<T>() * count;
         // SAFETY: dev.raw_device() is guaranteed to be valid.
         let ptr =
             unsafe { bindings::dma_alloc_coherent(dev.raw_device(), size, &mut dma_handle, flag) };
@@ -44,21 +43,48 @@ impl<T> Allocation<T> {
         } else {
             Ok(Allocation {
                 dev: device::Device::from_dev(dev),
-                size,
+                count,
                 dma_handle,
                 cpu_addr: ptr as _,
             })
         }
     }
+
+    /// Performs a volatile read of the object by index.
+    pub fn read_volatile(&self, index: usize) -> Option<T> {
+        if index >= self.count {
+            return None;
+        }
+
+        let ptr = self.cpu_addr.wrapping_add(index);
+        // SAFETY: We just checked that the index is within bounds.
+        Some(unsafe { ptr.read_volatile() })
+    }
+
+    /// Performs a write of the object by index.
+    pub fn write(&self, index: usize, value: &T) -> Result
+    where
+        T: Copy,
+    {
+        if index >= self.count {
+            return Err(error::code::EINVAL);
+        }
+
+        let ptr = self.cpu_addr.wrapping_add(index);
+        // SAFETY: We just checked that the index is within bounds.
+        unsafe { ptr.write(*value) };
+        Ok(())
+    }
 }
 
 impl<T> Drop for Allocation<T> {
     fn drop(&mut self) {
+        let size = core::mem::size_of::<T>() * self.count;
         // SAFETY: Allocation holds a reference to the device so self.dev.raw_device() is valid.
         unsafe {
             bindings::dma_free_coherent(
                 self.dev.raw_device(),
-                self.size,
+                size,
                 self.cpu_addr as _,
                 self.dma_handle,
             )
