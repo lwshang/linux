@@ -173,19 +173,20 @@ impl<T: DeviceOperations> Registration<T> {
         // SAFETY: `dev` was allocated during initialization and is guaranteed to be valid.
         let ret = unsafe {
             (*self.dev).netdev_ops = Self::build_device_ops();
+
+            // SAFETY: The C contract guarantees that `data` is available
+            // for implementers of the net_device operations (no other C code accesses
+            // it), so we know that there are no concurrent threads/CPUs accessing
+            // it (it's not visible to any other Rust code).
+            bindings::dev_set_drvdata(&mut (*self.dev).dev, data.into_pointer() as _);
             bindings::register_netdev(self.dev)
         };
         if ret != 0 {
+            // SAFETY: `dev` was allocated during initialization and is guaranteed to be valid.
+            unsafe { bindings::dev_set_drvdata(&mut (*self.dev).dev, core::ptr::null_mut()) }
             Err(Error::from_kernel_errno(ret))
         } else {
             self.registered = true;
-            unsafe {
-                // SAFETY: The C contract guarantees that `data` is available
-                // for implementers of the net_device operations (no other C code accesses
-                // it), so we know that there are no concurrent threads/CPUs accessing
-                // it (it's not visible to any other Rust code).
-                bindings::dev_set_drvdata(&mut (*self.dev).dev, data.into_pointer() as _);
-            }
             Ok(())
         }
     }
@@ -237,7 +238,11 @@ impl<T: DeviceOperations> Registration<T> {
         ndo_change_mtu: None,
         ndo_neigh_setup: None,
         ndo_tx_timeout: None,
-        ndo_get_stats64: None,
+        ndo_get_stats64: if <T>::HAS_GET_STATS64 {
+            Some(Self::get_stats64_callback)
+        } else {
+            None
+        },
         ndo_has_offload_stats: None,
         ndo_get_offload_stats: None,
         ndo_get_stats: None,
@@ -354,6 +359,49 @@ impl<T: DeviceOperations> Registration<T> {
         let data = unsafe { T::Data::borrow(bindings::dev_get_drvdata(&mut (*netdev).dev)) };
         T::start_xmit(skb, dev, data) as bindings::netdev_tx_t
     }
+
+    unsafe extern "C" fn get_stats64_callback(
+        netdev: *mut bindings::net_device,
+        storage: *mut bindings::rtnl_link_stats64,
+    ) {
+        // SAFETY: The C API guarantees that `net_device` isn't released while this function is running.
+        let dev = unsafe { Device::from_ptr(netdev) };
+        // SAFETY: The value stored as driver data was returned by `into_pointer` during registration.
+        let data = unsafe { T::Data::borrow(bindings::dev_get_drvdata(&mut (*netdev).dev)) };
+
+        T::get_stats64(dev, data, &mut RtnlLinkStats64 { ptr: storage });
+    }
+}
+
+/// Corresponds to the kernel's `struct rtnl_link_stats64`.
+pub struct RtnlLinkStats64 {
+    ptr: *mut bindings::rtnl_link_stats64,
+}
+
+impl RtnlLinkStats64 {
+    /// Set rx_bytes.
+    pub fn set_rx_bytes(&mut self, value: u64) {
+        // SAFETY: By the type invariants, `self.ptr` is valid.
+        unsafe { (*self.ptr).rx_bytes = value }
+    }
+
+    /// Set rx_packets.
+    pub fn set_rx_packets(&mut self, value: u64) {
+        // SAFETY: By the type invariants, `self.ptr` is valid.
+        unsafe { (*self.ptr).rx_packets = value }
+    }
+
+    /// Set tx_bytes.
+    pub fn set_tx_bytes(&mut self, value: u64) {
+        // SAFETY: By the type invariants, `self.ptr` is valid.
+        unsafe { (*self.ptr).tx_bytes = value }
+    }
+
+    /// Set tx_packets.
+    pub fn set_tx_packets(&mut self, value: u64) {
+        // SAFETY: By the type invariants, `self.ptr` is valid.
+        unsafe { (*self.ptr).tx_packets = value }
+    }
 }
 
 /// Driver transmit return codes.
@@ -391,6 +439,14 @@ pub trait DeviceOperations {
         dev: &Device,
         data: <Self::Data as PointerWrapper>::Borrowed<'_>,
     ) -> NetdevTx;
+
+    /// Corresponds to `ndo_get_stats64` in `struct net_device_ops`.
+    fn get_stats64(
+        _dev: &Device,
+        _data: <Self::Data as PointerWrapper>::Borrowed<'_>,
+        _storage: &mut RtnlLinkStats64,
+    ) {
+    }
 }
 
 /// Wraps the kernel's `struct net`.
