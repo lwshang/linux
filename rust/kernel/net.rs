@@ -10,6 +10,7 @@ use crate::{
     bindings, device,
     error::{code::ENOMEM, from_kernel_result},
     str::CStr,
+    sync::UniqueArc,
     to_result,
     types::PointerWrapper,
     ARef, AlwaysRefCounted, Error, Result,
@@ -17,6 +18,7 @@ use crate::{
 use core::{
     cell::UnsafeCell,
     marker::PhantomData,
+    pin::Pin,
     ptr::{addr_of, addr_of_mut, NonNull},
 };
 use macros::vtable;
@@ -118,10 +120,15 @@ impl Device {
         unsafe { bindings::netif_start_queue(self.0.get()) }
     }
 
-    /// Stop the upper layers to transmit.
+    /// Stops the upper layers to transmit.
     pub fn netif_stop_queue(&self) {
         // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
         unsafe { bindings::netif_stop_queue(self.0.get()) }
+    }
+
+    /// Reports bytes and packets completed by device.
+    pub fn completed_queue(&self, pkts: u32, bytes: u32) {
+        unsafe { bindings::netdev_completed_queue(self.0.get(), pkts, bytes) }
     }
 
     /// Allocate an skbuff for rx on the device.
@@ -449,6 +456,108 @@ pub trait DeviceOperations {
     }
 }
 
+/// Wraps the kernel's `struct napi_struct`.
+#[repr(transparent)]
+pub struct Napi(UnsafeCell<bindings::napi_struct>);
+
+impl Napi {
+    unsafe fn from_ptr<'a>(ptr: *const bindings::napi_struct) -> &'a Napi {
+        // SAFETY: The safety requirements guarantee the validity of the dereference, while the
+        // `Napi` type being transparent makes the cast ok.
+        unsafe { &*ptr.cast() }
+    }
+
+    fn new() -> Self {
+        Napi(UnsafeCell::new(bindings::napi_struct::default()))
+    }
+
+    /// Enable NAPI scheduling.
+    pub fn enable(&self) {
+        // SAFETY: The existence of a shared reference means `self.0` is valid.
+        unsafe {
+            bindings::napi_enable(self.0.get());
+        }
+    }
+
+    /// Schedule NAPI poll routine to be called if it is not already running.
+    pub fn schedule(&self) {
+        // SAFETY: The existence of a shared reference means `self.0` is valid.
+        unsafe {
+            if bindings::napi_schedule_prep(self.0.get()) {
+                bindings::__napi_schedule(self.0.get())
+            }
+        }
+    }
+
+    /// Marks NAPI processing as complete.
+    pub fn complete_done(&self, work_done: i32) {
+        // SAFETY: The existence of a shared reference means `self.0` is valid.
+        unsafe {
+            bindings::napi_complete_done(self.0.get(), work_done);
+        }
+    }
+
+    /// Sends the skb up the stack.
+    pub fn gro_receive(&self, skb: &SkBuff) {
+        // SAFETY: The existence of a shared reference means `self.0` is valid.
+        unsafe {
+            bindings::napi_gro_receive(self.0.get(), skb.0.get());
+        }
+    }
+
+    /// Returns a network device.
+    pub fn dev_get(&self) -> ARef<Device> {
+        // SAFETY: The existence of a shared reference means `self.0` is valid.
+        unsafe { &*(addr_of!((*self.0.get()).dev).read() as *const Device) }.into()
+    }
+}
+
+/// Adapter for initializing `Napi` object.
+pub struct NapiAdapter<T: NapiPoller>(PhantomData<T>);
+
+impl<T: NapiPoller> NapiAdapter<T> {
+    /// Creates a new Napi object.
+    pub fn add_weight(dev: &Device, weight: i32) -> Result<Pin<UniqueArc<Napi>>> {
+        let mut napi = Pin::from(UniqueArc::try_new(Napi::new())?);
+
+        unsafe {
+            bindings::netif_napi_add_weight(
+                &*dev as *const Device as *mut bindings::net_device,
+                napi.as_mut().0.get(),
+                Some(Self::poll_callback),
+                weight,
+            )
+        }
+        Ok(napi)
+    }
+
+    unsafe extern "C" fn poll_callback(
+        ptr: *mut bindings::napi_struct,
+        budget: core::ffi::c_int,
+    ) -> core::ffi::c_int {
+        let netdev = unsafe { (*ptr).dev };
+        let p = unsafe { bindings::dev_get_drvdata(&mut (*netdev).dev) };
+        let data = unsafe { T::Data::borrow(p) };
+        let napi = unsafe { Napi::from_ptr(ptr) };
+        T::poll(napi, budget, unsafe { Device::from_ptr(netdev) }, data)
+    }
+}
+
+/// Trait for NAPI poll method.
+pub trait NapiPoller {
+    /// The pointer type that will be used to hold driver-defined data type.
+    /// This must be same as DeviceOperations::Data.
+    type Data: PointerWrapper + Send + Sync = ();
+
+    /// Corresponds to NAPI poll method.
+    fn poll(
+        napi: &Napi,
+        budget: i32,
+        dev: &Device,
+        data: <Self::Data as PointerWrapper>::Borrowed<'_>,
+    ) -> i32;
+}
+
 /// Wraps the kernel's `struct net`.
 #[repr(transparent)]
 pub struct Namespace(UnsafeCell<bindings::net>);
@@ -515,6 +624,46 @@ impl SkBuff {
     pub fn len(&self) -> u32 {
         // SAFETY: The existence of a shared reference means `self.0` is valid.
         unsafe { core::ptr::addr_of!((*self.0.get()).len).read() }
+    }
+
+    /// Returns the current the data length (`struct sk_buff::data_len`).
+    pub fn data_len(&self) -> u32 {
+        // SAFETY: The existence of a shared reference means `self.0` is valid.
+        unsafe { core::ptr::addr_of!((*self.0.get()).data_len).read() }
+    }
+
+    /// Returns the packet's protocol ID.
+    pub fn eth_type_trans(&self, dev: &Device) -> u16 {
+        // SAFETY: The existence of a shared reference means `self.0` is valid.
+        unsafe { bindings::eth_type_trans(self.0.get(), dev.0.get()) }
+    }
+
+    /// Increase size and pad an skbuff up to the length
+    pub fn put_padto(&self, len: u32) -> i32 {
+        // SAFETY: The existence of a shared reference means `self.0` is valid.
+        unsafe { bindings::skb_put_padto(self.0.get(), len) }
+    }
+
+    /// Consuming the skb in NAPI context
+    pub fn napi_consume(&self, budget: i32) {
+        // SAFETY: The existence of a shared reference means `self.0` is valid.
+        unsafe { bindings::napi_consume_skb(self.0.get(), budget) }
+    }
+
+    /// Extends the used data area of the buffer.
+    pub fn put(&self, len: u32) {
+        // SAFETY: The existence of a shared reference means `self.0` is valid.
+        unsafe {
+            bindings::skb_put(self.0.get(), len);
+        }
+    }
+
+    /// Set the protocol ID in the skb.
+    pub fn protocol_set(&self, protocol: u16) {
+        // SAFETY: The existence of a shared reference means `self.0` is valid.
+        unsafe {
+            addr_of_mut!((*self.0.get()).__bindgen_anon_5.headers.as_mut().protocol).write(protocol)
+        }
     }
 }
 

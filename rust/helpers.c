@@ -739,6 +739,18 @@ struct sk_buff *rust_helper_netdev_alloc_skb_ip_align(struct net_device *dev,
 	return netdev_alloc_skb_ip_align(dev, length);
 }
 EXPORT_SYMBOL_GPL(rust_helper_netdev_alloc_skb_ip_align);
+
+int rust_helper_skb_put_padto(struct sk_buff *skb, unsigned int len) {
+	return skb_put_padto(skb, len);
+}
+EXPORT_SYMBOL_GPL(rust_helper_skb_put_padto);
+
+void rust_helper_netdev_completed_queue(struct net_device *dev, unsigned int pkts,
+	unsigned int bytes) {
+	netdev_completed_queue(dev, pkts, bytes);
+}
+EXPORT_SYMBOL_GPL(rust_helper_netdev_completed_queue);
+
 #endif
 
 u8 rust_helper_inb(unsigned long addr)
