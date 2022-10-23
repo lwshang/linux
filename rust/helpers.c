@@ -777,6 +777,11 @@ void rust_helper_outl(u32 value, unsigned long addr)
 }
 EXPORT_SYMBOL_GPL(rust_helper_outl);
 
+void rust_helper_mdelay(unsigned long usecs) {
+	mdelay(usecs);
+}
+EXPORT_SYMBOL_GPL(rust_helper_mdelay);
+
 void rust_helper_udelay(unsigned long usecs) {
 	udelay(usecs);
 }
