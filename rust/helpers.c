@@ -22,6 +22,7 @@
 #include <linux/bug.h>
 #include <linux/build_bug.h>
 #include <linux/clk.h>
+#include <linux/demo.h>
 #include <linux/errname.h>
 #include <linux/etherdevice.h>
 #include <linux/fs_parser.h>
@@ -803,6 +804,11 @@ void rust_helper_ndelay(unsigned long nsecs) {
 	ndelay(nsecs);
 }
 EXPORT_SYMBOL_GPL(rust_helper_ndelay);
+
+void rust_helper_demo_print(void) {
+	demo_print();
+}
+EXPORT_SYMBOL_GPL(rust_helper_demo_print);
 
 /*
  * We use `bindgen`'s `--size_t-is-usize` option to bind the C `size_t` type
